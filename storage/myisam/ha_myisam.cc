@@ -999,7 +999,7 @@ int ha_myisam::check(THD* thd, HA_CHECK_OPT* check_opt)
 {
   if (!file) return HA_ADMIN_INTERNAL_ERROR;
   int error;
-  HA_CHECK *param= (HA_CHECK*) thd->alloc(sizeof *param);
+  HA_CHECK *param= thd->alloc<HA_CHECK>(1);
   MYISAM_SHARE* share = file->s;
   const char *old_proc_info=thd->proc_info;
 
@@ -1105,7 +1105,7 @@ int ha_myisam::check(THD* thd, HA_CHECK_OPT* check_opt)
 int ha_myisam::analyze(THD *thd, HA_CHECK_OPT* check_opt)
 {
   int error=0;
-  HA_CHECK *param= (HA_CHECK*) thd->alloc(sizeof *param);
+  HA_CHECK *param= thd->alloc<HA_CHECK>(1);
   MYISAM_SHARE* share = file->s;
 
   if (!param)
@@ -1143,7 +1143,7 @@ int ha_myisam::analyze(THD *thd, HA_CHECK_OPT* check_opt)
 int ha_myisam::repair(THD* thd, HA_CHECK_OPT *check_opt)
 {
   int error;
-  HA_CHECK *param= (HA_CHECK*) thd->alloc(sizeof *param);
+  HA_CHECK *param= thd->alloc<HA_CHECK>(1);
   ha_rows start_records;
 
   if (!file || !param) return HA_ADMIN_INTERNAL_ERROR;
@@ -1200,7 +1200,7 @@ int ha_myisam::repair(THD* thd, HA_CHECK_OPT *check_opt)
 int ha_myisam::optimize(THD* thd, HA_CHECK_OPT *check_opt)
 {
   int error;
-  HA_CHECK *param= (HA_CHECK*) thd->alloc(sizeof *param);
+  HA_CHECK *param= thd->alloc<HA_CHECK>(1);
 
   if (!file || !param) return HA_ADMIN_INTERNAL_ERROR;
 
@@ -1463,7 +1463,7 @@ int ha_myisam::assign_to_keycache(THD* thd, HA_CHECK_OPT *check_opt)
   if (error != HA_ADMIN_OK)
   {
     /* Send error to user */
-    HA_CHECK *param= (HA_CHECK*) thd->alloc(sizeof *param);
+    HA_CHECK *param= thd->alloc<HA_CHECK>(1);
     if (!param)
       return HA_ADMIN_INTERNAL_ERROR;
 
@@ -1530,7 +1530,7 @@ int ha_myisam::preload_keys(THD* thd, HA_CHECK_OPT *check_opt)
 
  err:
   {
-    HA_CHECK *param= (HA_CHECK*) thd->alloc(sizeof *param);
+    HA_CHECK *param= thd->alloc<HA_CHECK>(1);
     if (!param)
       return HA_ADMIN_INTERNAL_ERROR;
     myisamchk_init(param);
@@ -1635,7 +1635,7 @@ int ha_myisam::enable_indexes(key_map map, bool persist)
   {
     THD *thd= table->in_use;
     int was_error= thd->is_error();
-    HA_CHECK *param= (HA_CHECK*) thd->alloc(sizeof *param);
+    HA_CHECK *param= thd->alloc<HA_CHECK>(1);
     const char *save_proc_info=thd->proc_info;
 
     if (!param)
