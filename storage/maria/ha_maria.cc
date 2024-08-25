@@ -3694,10 +3694,9 @@ bool maria_flush_logs(handlerton *hton)
 }
 
 
-int maria_checkpoint_state(handlerton *hton, bool disabled)
+void maria_checkpoint_state(bool disabled)
 {
   maria_checkpoint_disabled= (my_bool) disabled;
-  return 0;
 }
 
 
@@ -3923,7 +3922,7 @@ static int ha_maria_init(void *p)
   maria_hton->tablefile_extensions= ha_maria_exts;
   maria_hton->commit= maria_commit;
   maria_hton->rollback= maria_rollback;
-  maria_hton->checkpoint_state= maria_checkpoint_state;
+  maria_hton->disable_internal_writes= maria_checkpoint_state;
   maria_hton->flush_logs= maria_flush_logs;
   maria_hton->show_status= maria_show_status;
   maria_hton->prepare_for_backup= maria_prepare_for_backup;
