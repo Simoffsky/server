@@ -973,26 +973,41 @@ static int btr_latch_prev(buf_block_t *block, page_id_t page_id,
  retry:
   /* Pass no_wait pointer to ensure that we don't wait on the current page
   latch while holding the next page latch to avoid latch ordering violation. */
-  bool no_wait= false;
+  bool would_block= false;
   int ret= 1;
 
   buf_block_t *prev= buf_page_get_gen(page_id, zip_size, RW_NO_LATCH, nullptr,
-                                      BUF_GET, mtr, err, false, &no_wait);
+                                      BUF_GET, mtr, err, false, &would_block);
   if (UNIV_UNLIKELY(!prev))
   {
-    /* Check if we had to return because we couldn't wait on latch. */
-    if (no_wait)
-      goto ordered_latch;
-    return 0;
+    if (!would_block)
+      return 0;
+
+    if (rw_latch == RW_S_LATCH)
+      block->page.lock.s_unlock();
+    else
+      block->page.lock.x_unlock();
+
+    prev= buf_page_get_gen(page_id, zip_size, rw_latch, prev,
+                           BUF_GET, mtr, err);
+
+    if (rw_latch == RW_S_LATCH)
+      block->page.lock.s_lock();
+    else
+      block->page.lock.x_lock();
+
+    if (!prev)
+      return 0;
+    goto did_wait;
   }
 
   static_assert(MTR_MEMO_PAGE_S_FIX == mtr_memo_type_t(BTR_SEARCH_LEAF), "");
   static_assert(MTR_MEMO_PAGE_X_FIX == mtr_memo_type_t(BTR_MODIFY_LEAF), "");
+  mtr->lock_register(prev_savepoint, mtr_memo_type_t(rw_latch));
 
   if (rw_latch == RW_S_LATCH
       ? prev->page.lock.s_lock_try() : prev->page.lock.x_lock_try())
   {
-    mtr->lock_register(prev_savepoint, mtr_memo_type_t(rw_latch));
     if (UNIV_UNLIKELY(prev->page.id() != page_id))
     {
     fail:
@@ -1004,20 +1019,21 @@ static int btr_latch_prev(buf_block_t *block, page_id_t page_id,
   else
   {
     ut_ad(mtr->at_savepoint(mtr->get_savepoint() - 1)->page.id() == page_id);
-    mtr->release_last_page();
-ordered_latch:
+
     if (rw_latch == RW_S_LATCH)
+    {
       block->page.lock.s_unlock();
-    else
-      block->page.lock.x_unlock();
-
-    prev= buf_page_get_gen(page_id, zip_size, rw_latch, prev,
-                           BUF_GET, mtr, err);
-    if (rw_latch == RW_S_LATCH)
+      prev->page.lock.s_lock();
       block->page.lock.s_lock();
+    }
     else
+    {
+      block->page.lock.x_unlock();
+      prev->page.lock.x_lock();
       block->page.lock.x_lock();
+    }
 
+  did_wait:
     const page_id_t prev_page_id= page_id;
     page_id.set_page_no(btr_page_get_prev(page));
 
@@ -1314,7 +1330,7 @@ dberr_t btr_cur_t::search_leaf(const dtuple_t *tuple, page_cur_mode_t mode,
     ut_a(page_zip_validate(page_zip, block->page.frame, index()));
 #endif /* UNIV_ZIP_DEBUG */
 
-  const uint32_t page_level= btr_page_get_level(block->page.frame);
+  uint32_t page_level= btr_page_get_level(block->page.frame);
 
   if (height == ULINT_UNDEFINED)
   {
@@ -1322,6 +1338,7 @@ dberr_t btr_cur_t::search_leaf(const dtuple_t *tuple, page_cur_mode_t mode,
 #ifdef BTR_CUR_ADAPT
     info->root_guess= block;
 #endif
+  reached_root:
     height= page_level;
     tree_height= height + 1;
 
@@ -1331,27 +1348,41 @@ dberr_t btr_cur_t::search_leaf(const dtuple_t *tuple, page_cur_mode_t mode,
       We may have to reacquire the page latch in a different mode. */
       switch (rw_latch) {
       case RW_S_LATCH:
-        if ((latch_mode & ~12) != RW_S_LATCH)
+        if (!(latch_mode & BTR_SEARCH_LEAF))
         {
+          rw_latch= RW_X_LATCH;
           ut_ad(rw_lock_type_t(latch_mode & ~12) == RW_X_LATCH);
-          goto relatch_x;
+          mtr->lock_register(block_savepoint, MTR_MEMO_PAGE_X_FIX);
+          if (!block->page.lock.s_x_upgrade_try())
+          {
+            block->page.lock.s_unlock();
+            block->page.lock.x_lock();
+            /* Dropping the index tree (and freeing the root page)
+            should be impossible while we hold index()->lock. */
+            ut_ad(!block->page.is_freed());
+            page_level= btr_page_get_level(block->page.frame);
+            if (UNIV_UNLIKELY(page_level != 0))
+            {
+              /* btr_root_raise_and_insert() was executed meanwhile */
+              ut_ad(mtr->memo_contains_flagged(&index()->lock,
+                                               MTR_MEMO_S_LOCK));
+              goto reached_root;
+            }
+          }
         }
-        if (latch_mode != BTR_MODIFY_PREV)
-        {
-          if (!latch_by_caller)
-            /* Release the tree s-latch */
-            mtr->rollback_to_savepoint(savepoint, savepoint + 1);
-          goto reached_latched_leaf;
-        }
-        /* fall through */
+        if (latch_mode == BTR_MODIFY_PREV)
+          goto reached_leaf;
+        if (!latch_by_caller)
+          /* Release the tree s-latch */
+          mtr->rollback_to_savepoint(savepoint, savepoint + 1);
+        goto reached_latched_leaf;
       case RW_SX_LATCH:
-        ut_ad(rw_latch == RW_S_LATCH ||
-              latch_mode == BTR_MODIFY_ROOT_AND_LEAF);
-      relatch_x:
-        mtr->rollback_to_savepoint(block_savepoint);
-        height= ULINT_UNDEFINED;
+        ut_ad(latch_mode == BTR_MODIFY_ROOT_AND_LEAF);
+        static_assert(int{BTR_MODIFY_ROOT_AND_LEAF} == int{RW_SX_LATCH}, "");
         rw_latch= RW_X_LATCH;
-        goto search_loop;
+        mtr->lock_register(block_savepoint, MTR_MEMO_PAGE_X_FIX);
+        block->page.lock.u_x_upgrade();
+        goto reached_root_and_leaf;
       case RW_X_LATCH:
         if (latch_mode == BTR_MODIFY_TREE)
           goto reached_index_root_and_leaf;
@@ -1359,7 +1390,6 @@ dberr_t btr_cur_t::search_leaf(const dtuple_t *tuple, page_cur_mode_t mode,
       case RW_NO_LATCH:
         ut_ad(0);
       }
-      goto reached_leaf;
     }
   }
   else if (UNIV_UNLIKELY(height != page_level))
