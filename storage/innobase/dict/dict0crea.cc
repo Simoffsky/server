@@ -1791,40 +1791,6 @@ dict_foreign_def_get(
 }
 
 /********************************************************************//**
-Convert foreign key column names from data dictionary to SQL-layer.
-*/
-static
-void
-dict_foreign_def_get_fields(
-/*========================*/
-	dict_foreign_t*	foreign,/*!< in: foreign */
-	trx_t*		trx,	/*!< in: trx */
-	char**		field,  /*!< out: foreign column */
-	char**		field2, /*!< out: referenced column */
-	ulint		col_no) /*!< in: column number */
-{
-	char* bufend;
-	char* fieldbuf = (char *)mem_heap_alloc(foreign->heap, MAX_TABLE_NAME_LEN+1);
-	char* fieldbuf2 = (char *)mem_heap_alloc(foreign->heap, MAX_TABLE_NAME_LEN+1);
-
-	bufend = innobase_convert_name(fieldbuf, MAX_TABLE_NAME_LEN,
-			foreign->foreign_col_names[col_no],
-			strlen(foreign->foreign_col_names[col_no]),
-			trx->mysql_thd);
-
-	fieldbuf[bufend - fieldbuf] = '\0';
-
-	bufend = innobase_convert_name(fieldbuf2, MAX_TABLE_NAME_LEN,
-			foreign->referenced_col_names[col_no],
-			strlen(foreign->referenced_col_names[col_no]),
-			trx->mysql_thd);
-
-	fieldbuf2[bufend - fieldbuf2] = '\0';
-	*field = fieldbuf;
-	*field2 = fieldbuf2;
-}
-
-/********************************************************************//**
 Add a foreign key definition to the data dictionary tables.
 @return error code or DB_SUCCESS */
 dberr_t
@@ -1865,29 +1831,8 @@ dict_create_add_foreign_to_dictionary(
 				      , name, foreign->id, trx);
 
 	if (error != DB_SUCCESS) {
-
-		if (error == DB_DUPLICATE_KEY) {
-			char	buf[MAX_TABLE_NAME_LEN + 1] = "";
-			char	tablename[MAX_TABLE_NAME_LEN + 1] = "";
-			char*	fk_def;
-
-			innobase_convert_name(tablename, MAX_TABLE_NAME_LEN,
-				name, strlen(name), trx->mysql_thd);
-
-			innobase_convert_name(buf, MAX_TABLE_NAME_LEN,
-				foreign->id, strlen(foreign->id), trx->mysql_thd);
-
-			fk_def = dict_foreign_def_get((dict_foreign_t*)foreign, trx);
-
-			ib_push_warning(trx, error,
-				"Create or Alter table %s with foreign key constraint"
-				" failed. Foreign key constraint %s"
-				" already exists on data dictionary."
-				" Foreign key constraint names need to be unique in database."
-				" Error in foreign key definition: %s.",
-				tablename, buf, fk_def);
-		}
-
+err_exit:
+		innodb_fk_error(trx, error, name, *foreign);
 		DBUG_RETURN(error);
 	}
 
@@ -1896,27 +1841,7 @@ dict_create_add_foreign_to_dictionary(
 			i, name, foreign, trx);
 
 		if (error != DB_SUCCESS) {
-			char	buf[MAX_TABLE_NAME_LEN + 1] = "";
-			char	tablename[MAX_TABLE_NAME_LEN + 1] = "";
-			char*	field=NULL;
-			char*	field2=NULL;
-			char*	fk_def;
-
-			innobase_convert_name(tablename, MAX_TABLE_NAME_LEN,
-				name, strlen(name), trx->mysql_thd);
-			innobase_convert_name(buf, MAX_TABLE_NAME_LEN,
-				foreign->id, strlen(foreign->id), trx->mysql_thd);
-			fk_def = dict_foreign_def_get((dict_foreign_t*)foreign, trx);
-			dict_foreign_def_get_fields((dict_foreign_t*)foreign, trx, &field, &field2, i);
-
-			ib_push_warning(trx, error,
-				"Create or Alter table %s with foreign key constraint"
-				" failed. Error adding foreign  key constraint name %s"
-				" fields %s or %s to the dictionary."
-				" Error in foreign key definition: %s.",
-				tablename, buf, i+1, fk_def);
-
-			DBUG_RETURN(error);
+			goto err_exit;
 		}
 	}
 
