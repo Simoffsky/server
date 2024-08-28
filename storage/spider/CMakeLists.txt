@@ -58,6 +58,9 @@ ELSE()
   IF(NOT TARGET spider)
     RETURN()
   ENDIF()
+
+  configure_file(spd_err.h . COPYONLY)
+  configure_file(pspderr . COPYONLY)
 ENDIF()
 
 IF(ORACLE_INCLUDE_DIR AND ORACLE_OCI_LIBRARY)
