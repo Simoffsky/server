@@ -512,40 +512,52 @@ buf_page_is_checksum_valid_crc32(
 
 /** Checks whether the lsn present in the page is lesser than the
 peek current lsn.
-@param[in]	check_lsn	lsn to check
-@param[in]	read_buf	page. */
-static void buf_page_check_lsn(bool check_lsn, const byte* read_buf)
+@param check_lsn    lsn to check
+@param read_buf     page frame
+@return whether the FIL_PAGE_LSN is invalid */
+static bool buf_page_check_lsn(bool check_lsn, const byte *read_buf)
 {
-#ifndef UNIV_INNOCHECKSUM
-	if (check_lsn && recv_lsn_checks_on) {
-		const lsn_t current_lsn = log_sys.get_lsn();
-		const lsn_t	page_lsn
-			= mach_read_from_8(read_buf + FIL_PAGE_LSN);
+#ifdef UNIV_INNOCHECKSUM
+  return false;
+#else
+  if (!check_lsn)
+    return false;
+  lsn_t current_lsn= log_sys.get_lsn();
+  if (UNIV_UNLIKELY(current_lsn == LOG_START_LSN + LOG_BLOCK_HDR_SIZE) &&
+      srv_force_recovery == SRV_FORCE_NO_LOG_REDO)
+    return false;
+  const lsn_t page_lsn= mach_read_from_8(read_buf + FIL_PAGE_LSN);
 
-		/* Since we are going to reset the page LSN during the import
-		phase it makes no sense to spam the log with error messages. */
-		if (current_lsn < page_lsn) {
+  /* Since we are going to reset the page LSN during the import
+  phase it makes no sense to spam the log with error messages. */
+  if (UNIV_LIKELY(current_lsn >= page_lsn))
+    return false;
 
-			const uint32_t space_id = mach_read_from_4(
-				read_buf + FIL_PAGE_SPACE_ID);
-			const uint32_t page_no = mach_read_from_4(
-				read_buf + FIL_PAGE_OFFSET);
+  current_lsn= recv_sys.check_page_lsn(page_lsn);
 
-			ib::error() << "Page " << page_id_t(space_id, page_no)
-				<< " log sequence number " << page_lsn
-				<< " is in the future! Current system"
-				<< " log sequence number "
-				<< current_lsn << ".";
+  if (!current_lsn)
+    return false;
 
-			ib::error() << "Your database may be corrupt or"
-				" you may have copied the InnoDB"
-				" tablespace but not the InnoDB"
-				" log files. "
-				<< FORCE_RECOVERY_MSG;
+  const uint32_t space_id= mach_read_from_4(read_buf + FIL_PAGE_SPACE_ID);
+  const uint32_t page_no= mach_read_from_4(read_buf + FIL_PAGE_OFFSET);
 
-		}
-	}
-#endif /* !UNIV_INNOCHECKSUM */
+  sql_print_error("InnoDB: Page "
+                  "[page id: space=" UINT32PF ", page number=" UINT32PF "]"
+                  " log sequence number " LSN_PF
+                  " is in the future! Current system log sequence number "
+                  LSN_PF ".",
+                  space_id, page_no, page_lsn, current_lsn);
+
+  if (srv_force_recovery)
+    return false;
+
+  sql_print_error("InnoDB: Your database may be corrupt or"
+                  " you may have copied the InnoDB"
+                  " tablespace but not the ib_logfile0. %s",
+                  FORCE_RECOVERY_MSG);
+
+  return true;
+#endif
 }
 
 
@@ -609,8 +621,7 @@ buf_page_is_corrupted(
 			return true;
 		}
 
-		buf_page_check_lsn(check_lsn, read_buf);
-		return false;
+		return buf_page_check_lsn(check_lsn, read_buf);
 	}
 
 	const ulint zip_size = fil_space_t::zip_size(fsp_flags);
@@ -647,7 +658,9 @@ buf_page_is_corrupted(
 		return(true);
 	}
 
-	buf_page_check_lsn(check_lsn, read_buf);
+	if (buf_page_check_lsn(check_lsn, read_buf)) {
+		return true;
+	}
 
 	/* Check whether the checksum fields have correct values */
 

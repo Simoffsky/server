@@ -260,6 +260,10 @@ private:
   /** set when an inconsistency with the file system contents is detected
   during log scan or apply */
   bool found_corrupt_fs;
+  /** whether apply(false) is executing */
+  bool early_batch;
+  /** the maximum FIL_PAGE_LSN read during recovery */
+  lsn_t max_page_lsn;
 public:
   /** whether we are applying redo log records during crash recovery */
   bool recovery_on;
@@ -470,6 +474,18 @@ public:
   /** @return whether log file corruption was found */
   bool is_corrupt_log() const { return UNIV_UNLIKELY(found_corrupt_log); }
 
+  /** Check if a FIL_PAGE_LSN is valid during recovery.
+  @param lsn    the FIL_PAGE_LSN
+  @return the current log sequence number
+  @retval 0     if the current log sequence number is unknown */
+  ATTRIBUTE_COLD lsn_t check_page_lsn(lsn_t lsn);
+
+  /** Check if recovery reached a consistent log sequence number.
+  @param start_lsn  the checkpoint LSN
+  @param end_lsn    the end LSN of the FILE_CHECKPOINT mini-transaction
+  @return whether the recovery failed to process enough log */
+  inline bool validate_checkpoint(lsn_t start_lsn, lsn_t end_lsn) const;
+
   /** Attempt to initialize a page based on redo log records.
   @param page_id  page identifier
   @return the recovered block
@@ -511,11 +527,6 @@ extern bool		recv_needed_recovery;
 Protected by log_sys.mutex. */
 extern bool		recv_no_log_write;
 #endif /* UNIV_DEBUG */
-
-/** TRUE if buf_page_is_corrupted() should check if the log sequence
-number (FIL_PAGE_LSN) is in the future.  Initially FALSE, and set by
-recv_recovery_from_checkpoint_start(). */
-extern bool		recv_lsn_checks_on;
 
 /** Size of the parsing buffer; it must accommodate RECV_SCAN_SIZE many
 times! */

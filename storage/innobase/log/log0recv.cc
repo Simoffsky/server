@@ -66,11 +66,6 @@ Protected by log_sys.mutex. */
 bool	recv_no_log_write = false;
 #endif /* UNIV_DEBUG */
 
-/** TRUE if buf_page_is_corrupted() should check if the log sequence
-number (FIL_PAGE_LSN) is in the future.  Initially FALSE, and set by
-recv_recovery_from_checkpoint_start(). */
-bool	recv_lsn_checks_on;
-
 /** If the following is TRUE, the buffer pool file pages must be invalidated
 after recovery and no ibuf operations are allowed; this becomes TRUE if
 the log record hash table becomes too full, and log records must be merged
@@ -81,11 +76,6 @@ buffer pool before the pages have been recovered to the up-to-date state.
 true means that recovery is running and no operations on the log file
 are allowed yet: the variable name is misleading. */
 bool	recv_no_ibuf_operations;
-
-/** The maximum lsn we see for a page during the recovery process. If this
-is bigger than the lsn we are able to scan up to, that is an indication that
-the recovery failed and the database may be corrupt. */
-static lsn_t	recv_max_page_lsn;
 
 /** Stored physical log record */
 struct log_phys_t : public log_rec_t
@@ -1472,12 +1462,13 @@ void recv_sys_t::create()
 	recovered_lsn = 0;
 	found_corrupt_log = false;
 	found_corrupt_fs = false;
+	early_batch = false;
+	max_page_lsn= 0;
 	mlog_checkpoint_lsn = 0;
 
 	progress_time = time(NULL);
 	ut_ad(pages.empty());
 	pages_it = pages.end();
-	recv_max_page_lsn = 0;
 
 	memset(truncated_undo_spaces, 0, sizeof truncated_undo_spaces);
 	last_stored_lsn = 1;
@@ -2231,6 +2222,26 @@ ATTRIBUTE_COLD void recv_sys_t::wait_for_pool(size_t pages)
   mysql_mutex_unlock(&buf_pool.mutex);
   if (need_more)
     buf_flush_sync_batch(recovered_lsn);
+}
+
+/** Check if a FIL_PAGE_LSN is valid during recovery.
+@param lsn    the FIL_PAGE_LSN
+@return the current log sequence number
+@retval 0     if the current log sequence number is unknown */
+ATTRIBUTE_COLD lsn_t recv_sys_t::check_page_lsn(lsn_t lsn)
+{
+  ut_ad(lsn);
+  mysql_mutex_lock(&mutex);
+  if (recovered_lsn >= lsn)
+    lsn= 0;
+  else
+  {
+    if (lsn >= max_page_lsn)
+      max_page_lsn= lsn;
+    lsn= early_batch ? 0 : recovered_lsn;
+  }
+  mysql_mutex_unlock(&mutex);
+  return lsn;
 }
 
 /** Register a redo log snippet for a page.
@@ -3117,8 +3128,7 @@ set_start_lsn:
 			buf_pool.corrupted_evict(&block->page,
 						 block->page.state() &
 						 buf_page_t::LRU_MASK);
-			block = nullptr;
-			goto done;
+			return nullptr;
 		}
 
 		if (!start_lsn) {
@@ -3156,12 +3166,6 @@ set_start_lsn:
 
 	mtr.discard_modifications();
 	mtr.commit();
-
-done:
-	/* FIXME: do this in page read, protected with recv_sys.mutex! */
-	if (recv_max_page_lsn < page_lsn) {
-		recv_max_page_lsn = page_lsn;
-	}
 
 	return block;
 }
@@ -3682,6 +3686,7 @@ void recv_sys_t::apply(bool last_batch)
   DBUG_ASSERT(!last_batch == mysql_mutex_is_owner(&log_sys.mutex));
 #endif /* SAFE_MUTEX */
   mysql_mutex_lock(&mutex);
+  early_batch= !last_batch;
 
   garbage_collect();
 
@@ -4111,7 +4116,6 @@ recv_group_scan_log_recs(
 	recv_sys.scanned_lsn = *contiguous_lsn;
 	recv_sys.recovered_lsn = *contiguous_lsn;
 	recv_sys.scanned_checkpoint_no = 0;
-	ut_ad(recv_max_page_lsn == 0);
 	mysql_mutex_unlock(&recv_sys.mutex);
 
 	lsn_t	start_lsn;
@@ -4448,6 +4452,22 @@ dberr_t recv_recovery_read_max_checkpoint()
   return err;
 }
 
+inline
+bool recv_sys_t::validate_checkpoint(lsn_t start_lsn, lsn_t end_lsn) const
+{
+  if (recovered_lsn >= start_lsn &&
+      recovered_lsn >= end_lsn &&
+      recovered_lsn >= max_page_lsn)
+    return false;
+  sql_print_error("InnoDB: The log was only scanned up to "
+                  LSN_PF ", while the current LSN at the "
+                  "time of the latest checkpoint " LSN_PF
+                  " was " LSN_PF
+                  " and the maximum LSN on a data page was " LSN_PF "!",
+                  recovered_lsn, start_lsn, end_lsn, max_page_lsn);
+  return true;
+}
+
 /** Start recovering from a redo log checkpoint.
 @param[in]	flush_lsn	FIL_PAGE_FILE_FLUSH_LSN
 of first system tablespace page
@@ -4694,25 +4714,8 @@ completed:
 	}
 
 	if (!log_sys.is_physical()) {
-	} else if (recv_sys.recovered_lsn < checkpoint_lsn
-		   || recv_sys.recovered_lsn < end_lsn) {
-		sql_print_error("InnoDB: The log was only scanned up to "
-				LSN_PF ", while the current LSN at the "
-				"time of the latest checkpoint " LSN_PF
-				" was " LSN_PF "!",
-				recv_sys.recovered_lsn,
-				checkpoint_lsn, end_lsn);
+	} else if (recv_sys.validate_checkpoint(checkpoint_lsn, end_lsn)) {
 		goto err_exit;
-	} else if (log_sys.log.scanned_lsn < checkpoint_lsn
-		   || log_sys.log.scanned_lsn < end_lsn
-		   || log_sys.log.scanned_lsn < recv_max_page_lsn) {
-		sql_print_error("InnoDB: We scanned the log up to " LSN_PF
-				". A checkpoint was at " LSN_PF
-				" and the maximum LSN on a database page was "
-				LSN_PF ". It is possible that the"
-				" database is now corrupt!",
-				log_sys.log.scanned_lsn, checkpoint_lsn,
-				recv_max_page_lsn);
 	}
 
 	log_sys.next_checkpoint_lsn = checkpoint_lsn;
@@ -4755,7 +4758,6 @@ completed:
 		err = recv_rename_files();
 	}
 
-	recv_lsn_checks_on = true;
 	mysql_mutex_unlock(&recv_sys.mutex);
 
 	/* The database is now ready to start almost normal processing of user
@@ -4790,7 +4792,7 @@ bool recv_dblwr_t::validate_page(const page_id_t page_id,
     }
 
     /* Page 0 is never page_compressed or encrypted. */
-    return !buf_page_is_corrupted(true, page, flags);
+    return !buf_page_is_corrupted(false, page, flags);
   }
 
   ut_ad(tmp_buf);
@@ -4801,7 +4803,7 @@ bool recv_dblwr_t::validate_page(const page_id_t page_id,
     space->crypt_data->type != CRYPT_SCHEME_UNENCRYPTED;
 
   if (space->full_crc32())
-    return !buf_page_is_corrupted(true, page, space->flags);
+    return !buf_page_is_corrupted(false, page, space->flags);
 
   if (expect_encrypted &&
       mach_read_from_4(page + FIL_PAGE_FILE_FLUSH_LSN_OR_KEY_VERSION))
@@ -4829,10 +4831,10 @@ bool recv_dblwr_t::validate_page(const page_id_t page_id,
       return false; /* decompression failed */
     if (decomp == srv_page_size)
       return false; /* the page was not compressed (invalid page type) */
-    return !buf_page_is_corrupted(true, tmp_page, space->flags);
+    return !buf_page_is_corrupted(false, tmp_page, space->flags);
   }
 
-  return !buf_page_is_corrupted(true, page, space->flags);
+  return !buf_page_is_corrupted(false, page, space->flags);
 }
 
 byte *recv_dblwr_t::find_page(const page_id_t page_id,
