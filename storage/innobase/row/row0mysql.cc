@@ -1685,7 +1685,7 @@ row_update_for_mysql(row_prebuilt_t* prebuilt)
 		}
 	}
 
-	if (dict_table_has_fts_index(table)
+	if (dict_table_has_fts_index(table) && thr->fk_cascade_depth == 0
 	    && trx->fts_next_doc_id != UINT64_UNDEFINED) {
 		err = row_fts_update_or_delete(prebuilt);
 		if (UNIV_UNLIKELY(err != DB_SUCCESS)) {
@@ -1973,7 +1973,7 @@ row_update_cascade_for_mysql(
 		{
 			TABLE *mysql_table = thr->prebuilt->m_mysql_table;
 			thr->prebuilt->m_mysql_table = NULL;
-
+      //row_upd_step(thr);
 			dberr_t cascade_error = innodb_do_foreign_cascade(thr, node);
           if (UNIV_LIKELY(trx->error_state == DB_SUCCESS))
             trx->error_state = cascade_error;

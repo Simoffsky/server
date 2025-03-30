@@ -21631,7 +21631,7 @@ innodb_do_foreign_cascade(que_thr_t *thr, upd_node_t* node)
     row_sel_store_mysql_rec(maria_table->record[1], prebuilt, rec, NULL, 
                          true, clust_index, offsets);
 
-    if (node->upd_row == NULL) {
+    //if (node->upd_row == NULL) {
       node->row= row_build(ROW_COPY_DATA, clust_index, rec,
               offsets, NULL,
               NULL, NULL, &node->upd_ext, node->heap);
@@ -21639,7 +21639,7 @@ innodb_do_foreign_cascade(que_thr_t *thr, upd_node_t* node)
       node->upd_row= dtuple_copy(node->row, node->heap);
       row_upd_replace(node->upd_row, &node->upd_ext,
         clust_index, node->update, node->heap);
-    }
+    //}
 
     dtuple_t* entry= row_build_index_entry(node->upd_row, 
                                             NULL, 
